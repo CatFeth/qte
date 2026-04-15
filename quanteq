@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+# 1. Проверка: запущен ли скрипт от root
+if [ "$EUID" -ne 0 ]; then
+    # Если не root, проверяем, есть ли sudo
+    if command -v sudo &> /dev/null; then
+        echo "Перезапуск скрипта с правами sudo..."
+        exec sudo bash "$0" "$@"
+    else
+        echo "ОШИБКА: Скрипт должен быть запущен от имени root, но sudo не установлен."
+        echo "Пожалуйста, переключитесь на root (команда: su -) и запустите скрипт снова."
+        exit 1
+    fi
+fi
+
+# Ожидаем, что теперь пользователь в root
+set -e
+
+echo "--- 1. Обновление системы и установка утилит ---"
+apt update
+# Устанавливаем sudo, если его не было, и остальные нужные пакеты
+apt install -y sudo curl ufw nano
+
+echo "--- 2. Настройка Firewall (UFW) ---"
+ufw allow ssh
+ufw allow 2222/tcp
+ufw allow 443/tcp
+ufw default deny incoming
+ufw default allow outgoing
+ufw --force enable
+
+echo "--- 3. Оптимизация сети (BBR) ---"
+if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+fi
+
+echo "--- 4. Установка Warp-Native ---"
+# Скрипт варпа обычно сам требует root, так что тут все ок
+bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)
+
+echo "--- 5. Установка Docker ---"
+if ! command -v docker &> /dev/null; then
+    curl -fsSL https://get.docker.com | sh
+fi
+
+echo "--- 6. Настройка Remnanode ---"
+mkdir -p /opt/remnanode
+cd /opt/remnanode
+
+echo "-------------------------------------------------------"
+echo "СЕЙЧАС ОТКРОЕТСЯ NANO."
+echo "Вставьте ваш docker-compose конфиг, нажмите Ctrl+O, Enter, затем Ctrl+X"
+echo "-------------------------------------------------------"
+sleep 3
+
+nano docker-compose.yml
+
+echo "--- 7. Запуск Docker Compose ---"
+docker compose up -d
+
+echo "--- 8. Проверка логов (Ctrl+C для выхода) ---"
+docker compose logs -f -t
