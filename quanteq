@@ -1,27 +1,22 @@
 #!/usr/bin/env bash
 
-# 1. Проверка: запущен ли скрипт от root
+# 1. Проверка прав (root/sudo)
 if [ "$EUID" -ne 0 ]; then
-    # Если не root, проверяем, есть ли sudo
     if command -v sudo &> /dev/null; then
-        echo "Перезапуск скрипта с правами sudo..."
+        echo "Перезапуск с правами sudo..."
         exec sudo bash "$0" "$@"
     else
-        echo "ОШИБКА: Скрипт должен быть запущен от имени root, но sudo не установлен."
-        echo "Пожалуйста, переключитесь на root (команда: su -) и запустите скрипт снова."
+        echo "ОШИБКА: Запустите скрипт от имени root (su -)."
         exit 1
     fi
 fi
 
-# Ожидаем, что теперь пользователь в root
 set -e
 
-echo "--- 1. Обновление системы и установка утилит ---"
-apt update
-# Устанавливаем sudo, если его не было, и остальные нужные пакеты
-apt install -y sudo curl ufw nano
+echo "--- 1. Обновление и установка базовых утилит ---"
+apt update && apt install -y sudo curl ufw nano
 
-echo "--- 2. Настройка Firewall (UFW) ---"
+echo "--- 2. Настройка Firewall ---"
 ufw allow ssh
 ufw allow 2222/tcp
 ufw allow 443/tcp
@@ -36,9 +31,9 @@ if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
     sysctl -p
 fi
 
-echo "--- 4. Установка Warp-Native ---"
-# Скрипт варпа обычно сам требует root, так что тут все ок
-bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)
+echo "--- 4. Установка Warp-Native (Авто-ответы) ---"
+# Подаем на вход скрипту: 2 (язык), Enter, Пробел (ключ), Enter
+printf "2\n \n" | bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)
 
 echo "--- 5. Установка Docker ---"
 if ! command -v docker &> /dev/null; then
@@ -51,14 +46,17 @@ cd /opt/remnanode
 
 echo "-------------------------------------------------------"
 echo "СЕЙЧАС ОТКРОЕТСЯ NANO."
-echo "Вставьте ваш docker-compose конфиг, нажмите Ctrl+O, Enter, затем Ctrl+X"
+echo "1. Вставьте конфиг."
+echo "2. Нажмите Ctrl+O, Enter (сохранить)."
+echo "3. Нажмите Ctrl+X (выйти)."
 echo "-------------------------------------------------------"
-sleep 3
+sleep 2
 
-nano docker-compose.yml
+
+nano docker-compose.yml < /dev/tty
 
 echo "--- 7. Запуск Docker Compose ---"
 docker compose up -d
 
-echo "--- 8. Проверка логов (Ctrl+C для выхода) ---"
+echo "--- 8. Логи контейнера (Ctrl+C для выхода) ---"
 docker compose logs -f -t
