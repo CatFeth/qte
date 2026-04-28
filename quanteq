@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 
-# 1. Проверка прав (root/sudo)
 if [ "$EUID" -ne 0 ]; then
     if command -v sudo &> /dev/null; then
-        echo "Перезапуск с правами sudo..."
+        echo "Reload with sudo..."
         exec sudo bash "$0" "$@"
     else
-        echo "ОШИБКА: Запустите скрипт от имени root (su -)."
+        echo "Need root acess (su -)."
         exit 1
     fi
 fi
 
 set -e
 
-echo "--- 1. Обновление и установка базовых утилит ---"
+echo "--- 1. Update & Download base utilities ---"
 apt update && apt install -y sudo curl ufw nano
 
-echo "--- 2. Настройка Firewall ---"
+echo "--- 2. Settings for UFW ---"
 ufw allow ssh
 ufw allow 2222/tcp
 ufw allow 443/tcp
@@ -24,39 +23,38 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw --force enable
 
-echo "--- 3. Оптимизация сети (BBR) ---"
+echo "--- 3. Enable BBR ---"
 if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p
 fi
 
-echo "--- 4. Установка Warp-Native (Авто-ответы) ---"
-# Подаем на вход скрипту: 2 (язык), Enter, Пробел (ключ), Enter
-printf "2\n \n" | bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)
+echo "--- 4. WARP Installatiom ---"
+printf "2\n \n" | sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
 
-echo "--- 5. Установка Docker ---"
+echo "--- 5. Docker Installation  ---"
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sh
 fi
 
-echo "--- 6. Настройка Remnanode ---"
+echo "--- 6. Install RemnaNode ---"
 mkdir -p /opt/remnanode
 cd /opt/remnanode
 
 echo "-------------------------------------------------------"
-echo "СЕЙЧАС ОТКРОЕТСЯ NANO."
-echo "1. Вставьте конфиг."
-echo "2. Нажмите Ctrl+O, Enter (сохранить)."
-echo "3. Нажмите Ctrl+X (выйти)."
+echo "Nano is opening soon"
+echo "1. Get config"
+echo "2. Ctrl+O, Enter"
+echo "3. Ctrl+X"
 echo "-------------------------------------------------------"
 sleep 2
 
 
 nano docker-compose.yml < /dev/tty
 
-echo "--- 7. Запуск Docker Compose ---"
+echo "--- 7. Start Docker Compose ---"
 docker compose up -d
 
-echo "--- 8. Логи контейнера (Ctrl+C для выхода) ---"
+echo "--- 8. Logs (Ctrl + C for exit) ---"
 docker compose logs -f -t
