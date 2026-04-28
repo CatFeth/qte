@@ -31,7 +31,7 @@ if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
 fi
 
 echo "--- 4. WARP Installation ---"
-printf "1\n\n\ny\n" | sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
+printf "1\n\n\ny\n0\n" | sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
 
 echo "--- 5. Docker Installation  ---"
 if ! command -v docker &> /dev/null; then
