@@ -13,7 +13,7 @@ fi
 set -e
 
 echo "--- 1. Update & Download base utilities ---"
-apt update && apt install -y sudo curl ufw nano
+apt update && apt install -y sudo curl ufw nano && sudo curl -fsSL https://get.docker.com | sh
 
 echo "--- 2. Settings for UFW ---"
 ufw allow ssh
@@ -32,12 +32,8 @@ fi
 
 echo "--- 4. WARP Installation ---"
 printf "1\n\ny\n\n0\n" | sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
-echo "--- 5. Docker Installation  ---"
-if ! command -v docker &> /dev/null; then
-    curl -fsSL https://get.docker.com | sh
-fi
 
-echo "--- 6. Install RemnaNode ---"
+echo "--- 5. Install RemnaNode ---"
 mkdir -p /opt/remnanode
 cd /opt/remnanode
 
@@ -51,8 +47,8 @@ sleep 2
 
 nano docker-compose.yml < /dev/tty
 
-echo "--- 7. Start Docker Compose ---"
+echo "--- 6. Start Docker Compose ---"
 docker compose up -d
 
-echo "--- 8. Logs (Ctrl + C for exit) ---"
+echo "--- 7. Logs (Ctrl + C for exit) ---"
 docker compose logs -f -t
