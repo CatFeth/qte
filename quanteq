@@ -13,38 +13,56 @@ fi
 set -e
 
 echo "--- 1. Update & Download base utilities ---"
-apt update && apt install -y sudo curl ufw nano && sudo curl -fsSL https://get.docker.com | sh
+if ! command -v docker &> /dev/null || ! command -v ufw &> /dev/null; then
+    apt update && apt install -y sudo curl ufw nano 
+    curl -fsSL https://get.docker.com | sh
+else
+    echo "Skipped: Base utilities and Docker are already installed."
+fi
 
 echo "--- 2. Settings for UFW ---"
-ufw allow ssh
-ufw allow 2222/tcp
-ufw allow 443/tcp
-ufw default deny incoming
-ufw default allow outgoing
-ufw --force enable
+if ! ufw status | grep -qw "active"; then
+    ufw allow ssh
+    ufw allow 2222/tcp
+    ufw allow 443/tcp
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw --force enable
+else
+    echo "Skipped: UFW is already active."
+fi
 
 echo "--- 3. Enable BBR ---"
-if ! grep "net.core.default_qdisc=fq" 
->> /etc/sysctl.conf && echo "net.ipv4.tcp_congestion_control=bbr" 
->> /etc/sysctl.conf && sudo sysctl --system
+if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf && echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf && sudo sysctl --system
+else
+    echo "Skipped: BBR is already configured."
 fi
 
 echo "--- 4. WARP Installation ---"
-printf "1\n\ny\n\n0\n" | sudo bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
+if ! docker ps -a --format '{{.Names}}' | grep -Eq "^warp$"; then
+    printf "1\n\ny\n\n0\n" | bash -c "$(curl -sL https://raw.githubusercontent.com/xxphantom/docker-warp-native/main/install.sh)"
+else
+    echo "Skipped: WARP container already exists."
+fi
 
 echo "--- 5. Install RemnaNode ---"
 mkdir -p /opt/remnanode
 cd /opt/remnanode
 
-echo "-------------------------------------------------------"
-echo "Nano is opening soon"
-echo "1. Get config"
-echo "2. Ctrl+O, Enter"
-echo "3. Ctrl+X"
-echo "-------------------------------------------------------"
-sleep 2
+if [ ! -s "docker-compose.yml" ]; then
+    echo "-------------------------------------------------------"
+    echo "Nano is opening soon"
+    echo "1. Get config"
+    echo "2. Ctrl+O, Enter"
+    echo "3. Ctrl+X"
+    echo "-------------------------------------------------------"
+    sleep 2
 
-nano docker-compose.yml < /dev/tty
+    nano docker-compose.yml < /dev/tty
+else
+    echo "Skipped: docker-compose.yml already exists and is not empty."
+fi
 
 echo "--- 6. Start Docker Compose ---"
 docker compose up -d
