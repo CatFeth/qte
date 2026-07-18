@@ -25,7 +25,7 @@ echo "--- 2. Settings for UFW ---"
 if ! ufw status | grep -qw "active"; then
     # Если ufw выдает ошибку, просто идем дальше (|| true игнорирует ошибку)
     ufw allow ssh || true
-    ufw allow 2222/tcp || true
+    ufw allow from 5.231.119.98 to any port 2222 proto tcp || true
     ufw allow 443/tcp || true
     ufw default deny incoming || true
     ufw default allow outgoing || true
