@@ -19,9 +19,12 @@ fi
 
 echo "--- 1. Update & Download base utilities ---"
 if ! command -v docker &> /dev/null || ! command -v ufw &> /dev/null; then
-    timeout 120s apt-get update -y || echo "Warning: apt update failed or timed out."
-    timeout 120s apt-get install -y sudo curl ufw nano || echo "Warning: apt install failed or timed out."
-    timeout 120s curl -fsSL https://get.docker.com | sh || echo "Warning: Docker installation failed or timed out."
+    echo "Updating system and installing base packages... (This may take a few minutes)"
+    apt-get update -y || echo "Warning: apt update failed."
+    apt-get install -y sudo curl ufw nano || echo "Warning: apt install failed."
+    
+    echo "Installing Docker... (Please wait)"
+    curl -fsSL https://get.docker.com | sh || echo "Warning: Docker installation failed."
 else
     echo "Skipped: Base utilities and Docker are already installed."
 fi
