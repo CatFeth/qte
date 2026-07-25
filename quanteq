@@ -2,7 +2,7 @@
 
 if [ "$EUID" -ne 0 ]; then
     if command -v sudo &> /dev/null; then
-        echo "Reload with sudo..."
+        echo "Reloading with sudo..."
         exec sudo bash "$0" "$@"
     else
         echo "Need root access (su -)."
@@ -10,12 +10,17 @@ if [ "$EUID" -ne 0 ]; then
     fi
 fi
 
-# Убрали set -e, теперь скрипт не умирает при первой же ошибке
+echo -n "Enter your Panel IP address (for RemnaNode 2222/tcp): "
+read PANEL_IP
+if [[ -z "$PANEL_IP" ]]; then
+    echo "Error: Panel IP cannot be empty!"
+    exit 1
+fi
 
 echo "--- 1. Update & Download base utilities ---"
 if ! command -v docker &> /dev/null || ! command -v ufw &> /dev/null; then
-    timeout 120s apt update || echo "Warning: apt update failed or timed out."
-    timeout 120s apt install -y sudo curl ufw nano || echo "Warning: apt install failed or timed out."
+    timeout 120s apt-get update -y || echo "Warning: apt update failed or timed out."
+    timeout 120s apt-get install -y sudo curl ufw nano || echo "Warning: apt install failed or timed out."
     timeout 120s curl -fsSL https://get.docker.com | sh || echo "Warning: Docker installation failed or timed out."
 else
     echo "Skipped: Base utilities and Docker are already installed."
@@ -23,10 +28,11 @@ fi
 
 echo "--- 2. Settings for UFW ---"
 if ! ufw status | grep -qw "active"; then
-    # Если ufw выдает ошибку, просто идем дальше (|| true игнорирует ошибку)
-    ufw allow ssh || true
-    ufw allow from 5.231.119.98 to any port 2222 proto tcp || true
+    ufw allow 22/tcp || true
+    ufw allow 80/tcp || true
     ufw allow 443/tcp || true
+    ufw allow from "$PANEL_IP" to any port 2222 proto tcp || true
+    
     ufw default deny incoming || true
     ufw default allow outgoing || true
     ufw --force enable || echo "Warning: UFW enable failed."
@@ -35,12 +41,26 @@ else
 fi
 
 echo "--- 3. Enable BBR ---"
-if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
-    (echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf && \
-     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf && \
-     sudo sysctl --system) || echo "Warning: BBR setup failed."
+if ! grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf; then
+    cat <<EOF | sudo tee -a /etc/sysctl.conf > /dev/null
+
+# --- BBR ---
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+fs.file-max = 1000000
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 8192
+EOF
+    sudo sysctl --system || echo "Warning: Sysctl apply failed."
 else
-    echo "Skipped: BBR is already configured."
+    echo "Skipped: Network optimizations are already configured."
 fi
 
 echo "--- 4. WARP Installation ---"
@@ -53,12 +73,12 @@ fi
 
 echo "--- 5. Install RemnaNode ---"
 mkdir -p /opt/remnanode || true
-cd /opt/remnanode || echo "Warning: Cannot enter /opt/remnanode directory."
+cd /opt/remnanode || { echo "Warning: Cannot enter /opt/remnanode directory."; exit 1; }
 
 if [ ! -s "docker-compose.yml" ]; then
     echo "-------------------------------------------------------"
     echo "Nano is opening soon"
-    echo "1. Get config"
+    echo "1. Paste config"
     echo "2. Ctrl+O, Enter"
     echo "3. Ctrl+X"
     echo "-------------------------------------------------------"
