@@ -11,22 +11,31 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo -n "Enter your Panel IP address (for RemnaNode 2222/tcp): "
-read PANEL_IP
+read -r PANEL_IP
 if [[ -z "$PANEL_IP" ]]; then
     echo "Error: Panel IP cannot be empty!"
     exit 1
 fi
 
 echo "--- 1. Update & Download base utilities ---"
-if ! command -v docker &> /dev/null || ! command -v ufw &> /dev/null; then
-    echo "Updating system and installing base packages... (This may take a few minutes)"
-    apt-get update -y || echo "Warning: apt update failed."
-    apt-get install -y sudo curl ufw nano || echo "Warning: apt install failed."
-    
+apt-get update -y || echo "Warning: apt update failed."
+apt-get install -y sudo || echo "Warning: sudo installation failed."
+
+echo "Upgrading system packages... (This may take a few minutes)"
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get upgrade -y || echo "Warning: apt upgrade failed."
+apt-get full-upgrade -y || echo "Warning: apt full-upgrade failed."
+apt-get autoremove -y || echo "Warning: apt autoremove failed."
+
+echo "Installing base utilities (ufw, nano, curl, htop)..."
+apt-get install -y curl ufw nano htop || echo "Warning: base packages installation failed."
+
+if ! command -v docker &> /dev/null; then
     echo "Installing Docker... (Please wait)"
     curl -fsSL https://get.docker.com | sh || echo "Warning: Docker installation failed."
 else
-    echo "Skipped: Base utilities and Docker are already installed."
+    echo "Skipped: Docker is already installed."
 fi
 
 echo "--- 2. Settings for UFW ---"
@@ -45,7 +54,7 @@ fi
 
 echo "--- 3. Enable BBR ---"
 if ! grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf; then
-    cat <<EOF | sudo tee -a /etc/sysctl.conf > /dev/null
+    cat <<EOF >> /etc/sysctl.conf
 
 # --- BBR ---
 net.core.default_qdisc = fq
@@ -57,7 +66,7 @@ net.ipv4.tcp_wmem = 4096 65536 16777216
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
 EOF
-    sudo sysctl --system || echo "Warning: Sysctl apply failed."
+    sysctl --system || echo "Warning: Sysctl apply failed."
 else
     echo "Skipped: Network optimizations are already configured."
 fi
@@ -89,6 +98,10 @@ else
 fi
 
 echo "--- 6. Start Docker Compose ---"
+echo "Cleaning up dangling Docker images..."
+docker image prune -f || true
+
+echo "Starting containers..."
 timeout 120s docker compose up -d || echo "Warning: Docker compose failed or timed out."
 
 echo "--- 7. Logs (Ctrl + C for exit) ---"
