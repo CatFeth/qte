@@ -100,7 +100,7 @@ ufw allow 22/tcp    || true
 ufw allow 80/tcp    || true
 ufw allow 443/tcp   || true
  
-# Удаляем старые правила на 2222/tcp от "anywhere", если такие остались от предыдущих запусков с другим PANEL_IP
+# Удаляем старые правила на 2222/tcp от "anywhere", если такие остались
 ufw status numbered 2>/dev/null | grep "2222/tcp" | grep -v "$PANEL_IP" | \
     awk -F'[][]' '{print $2}' | sort -rn | while read -r num; do
         [ -n "$num" ] && yes | ufw delete "$num" >/dev/null 2>&1 || true
@@ -134,7 +134,7 @@ else
     if ! lsmod | grep -qw tcp_bbr && ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
         echo "Warning: tcp_bbr module could not be loaded. Applying sysctl anyway, but it may fail to take effect."
     fi
- 
+
     if ! grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf; then
         cat <<'EOF' >> /etc/sysctl.conf
  
@@ -171,8 +171,8 @@ ICMP_RATE_LIMIT="100/s"
 ICMP_RATE_BURST="200"
  
 configure_icmp_output_limit() {
-    local rules_file="$1"     # /etc/ufw/before.rules или before6.rules
-    local proto_marker="$2"   # "icmp" или "icmpv6" — для идемпотентной проверки
+    local rules_file="$1"
+    local proto_marker="$2"
  
     if [ ! -f "$rules_file" ]; then
         echo "Warning: $rules_file not found, skipping ICMP rate-limit for it."
@@ -220,12 +220,28 @@ configure_icmp_output_limit() {
     rm -f "$tmp_file"
 }
  
-configure_icmp_output_limit /etc/ufw/before.rules  "icmp"
-configure_icmp_output_limit /etc/ufw/before6.rules "icmpv6"
+configure_icmp_output_limit /etc/ufw/before.rules "icmp"
+ 
+# IPv6-правила трогаем только если IPv6 реально доступен в ядре и включён в самом ufw. 
+IPV6_USABLE=false
+if [ -e /proc/net/if_inet6 ] && [ -f /etc/default/ufw ] && grep -qE '^IPV6=yes' /etc/default/ufw; then
+    IPV6_USABLE=true
+fi
+ 
+if [ "$IPV6_USABLE" = true ]; then
+    configure_icmp_output_limit /etc/ufw/before6.rules "icmpv6"
+else
+    echo "Skipped: IPv6 is disabled or unavailable on this host, not touching before6.rules."
+fi
  
 # Перечитываем правила ufw, чтобы новые записи из before.rules применились
 if ufw status | grep -qw "active"; then
-    ufw reload || echo "Warning: ufw reload failed, ICMP rate-limit may not be active yet."
+    if ! ufw reload; then
+        echo "Warning: ufw reload failed."
+        if [ "$IPV6_USABLE" = true ]; then
+            echo "Check /etc/ufw/before6.rules for syntax issues, or set IPV6=no in /etc/default/ufw if this host has no real IPv6 stack."
+        fi
+    fi
 fi
  
 # --- 4. WARP installation ------------------------------------------------------
