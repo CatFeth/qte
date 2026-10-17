@@ -105,7 +105,7 @@ if [ -f /etc/default/ufw ]; then
     fi
 fi
 
-# Базовые порты (если IPV6=yes, UFW автоматически создаст правила для IPv6)
+# Базовые порты (если IPV6=yes, UFW автоматически создаст правила и для v4, и для v6)
 ufw allow 22/tcp  || true
 ufw allow 80/tcp  || true
 ufw allow 443/tcp || true
@@ -128,6 +128,12 @@ fi
 
 # --- 3. BBR, Sysctl, Conntrack & File Limits ----------------------------------
 echo "--- 3. Enable BBR, Network Tweaks & System Limits ---"
+
+# Автоочистка старого блока настроек из /etc/sysctl.conf (миграция со старых версий скрипта)
+if [ -f /etc/sysctl.conf ] && grep -q "# --- BBR & Network Tweaks ---" /etc/sysctl.conf; then
+    sed -i '/# --- BBR & Network Tweaks ---/,/net.ipv4.icmp_ratemask = 6160/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "Cleaned up legacy network block from /etc/sysctl.conf."
+fi
 
 # Автоопределение размера буферов по объему ОЗУ (>= 8 ГБ -> 64 МБ, иначе 16 МБ)
 TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
@@ -252,6 +258,12 @@ systemctl enable --now network-tune-persist.service || echo "Warning: network-tu
 echo "--- 3.1 ICMP Destination Unreachable rate-limit (ufw output rules) ---"
 ICMP_RATE_LIMIT="100/s"
 ICMP_RATE_BURST="200"
+
+# Автоисправление старой опечатки в цепочке before6.rules (если скрипт старой версии уже запускался на сервере)
+if [ -f /etc/ufw/before6.rules ] && grep -q "ufw-before-output -p icmpv6" /etc/ufw/before6.rules; then
+    sed -i 's/-A ufw-before-output -p icmpv6/-A ufw6-before-output -p ipv6-icmp/g' /etc/ufw/before6.rules
+    echo "Fixed legacy chain name in /etc/ufw/before6.rules."
+fi
 
 configure_icmp_output_limit() {
     local rules_file="$1"
