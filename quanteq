@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
 
 # ============================================================
 #  Quanteq | VPS Configuration + Installer Remnanode 
@@ -8,106 +8,116 @@ set -u
 # ============================================================
 
 # --- 0. Root check ---------------------------------------------------------
-if [ "$EUID" -ne 0 ]; then
-    if command -v sudo &> /dev/null; then
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    if [ -f "$0" ] && command -v sudo &> /dev/null; then
         echo "Reloading with sudo..."
         exec sudo bash "$0" "$@"
     else
-        echo "Need root access (su -)."
+        echo "Error: Please run this script as root (sudo -i or su -)."
         exit 1
     fi
 fi
- 
+
 # --- 0.1 OS check -----------------------------------------------------------
 if ! command -v apt-get &> /dev/null; then
     echo "Error: this script only supports Debian/Ubuntu (apt-get not found)."
     exit 1
 fi
- 
-# --- 0.2 Panel IP input ------------------------------------------------------
+
+# --- 0.2 Panel IP input (IPv4 or IPv6) --------------------------------------
 if [ ! -t 0 ] && [ ! -e /dev/tty ]; then
     echo "Error: no interactive terminal available to read input."
     exit 1
 fi
- 
-echo -n "Enter your Panel IP address (for RemnaNode 2222/tcp): "
+
+echo -n "Enter your Panel IP address (IPv4 or IPv6 for RemnaNode 2222/tcp): "
 read -r PANEL_IP < /dev/tty
- 
+
 # Убираем случайные пробелы
 PANEL_IP="$(echo -n "$PANEL_IP" | tr -d '[:space:]')"
- 
+
 if [[ -z "$PANEL_IP" ]]; then
     echo "Error: Panel IP cannot be empty!"
     exit 1
 fi
- 
-# Валидация формата IPv4
+
 IPV4_REGEX='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-if ! [[ "$PANEL_IP" =~ $IPV4_REGEX ]]; then
-    echo "Error: '$PANEL_IP' is not a valid IPv4 address."
+IPV6_REGEX='^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+
+if [[ "$PANEL_IP" =~ $IPV4_REGEX ]]; then
+    IFS='.' read -r o1 o2 o3 o4 <<< "$PANEL_IP"
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        if (( 10#$octet > 255 )); then
+            echo "Error: '$PANEL_IP' has an octet > 255."
+            exit 1
+        fi
+    done
+elif ! [[ "$PANEL_IP" =~ $IPV6_REGEX ]]; then
+    echo "Error: '$PANEL_IP' is not a valid IPv4 or IPv6 address."
     exit 1
 fi
- 
-# Доп. проверка, что каждый октет <= 255
-valid_octets=true
-IFS='.' read -r o1 o2 o3 o4 <<< "$PANEL_IP"
-for octet in "$o1" "$o2" "$o3" "$o4"; do
-    if [ "$octet" -gt 255 ]; then
-        valid_octets=false
-    fi
-done
-if [ "$valid_octets" = false ]; then
-    echo "Error: '$PANEL_IP' has an octet > 255."
-    exit 1
-fi
- 
+
 echo "Panel IP accepted: $PANEL_IP"
- 
+
 # --- 1. Update & Download base utilities ------------------------------------
 echo "--- 1. Update & Download base utilities ---"
- 
+
 export DEBIAN_FRONTEND=noninteractive
- 
+APT_FLAGS=(-y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold")
+
 apt-get update -y || echo "Warning: apt update failed."
-apt-get install -y sudo || echo "Warning: sudo installation failed."
- 
+apt-get install "${APT_FLAGS[@]}" sudo ca-certificates curl ufw nano htop iproute2 ethtool kmod || echo "Warning: base packages installation failed."
+
 echo "Upgrading system packages... (This may take a few minutes)"
-apt-get upgrade -y || echo "Warning: apt upgrade failed."
-apt-get full-upgrade -y || echo "Warning: apt full-upgrade failed."
-apt-get autoremove -y || echo "Warning: apt autoremove failed."
- 
-echo "Installing base utilities (ufw, nano, curl, htop)..."
-apt-get install -y curl ufw nano htop ca-certificates || echo "Warning: base packages installation failed."
- 
+apt-get upgrade "${APT_FLAGS[@]}" || echo "Warning: apt upgrade failed."
+apt-get full-upgrade "${APT_FLAGS[@]}" || echo "Warning: apt full-upgrade failed."
+apt-get autoremove "${APT_FLAGS[@]}" || echo "Warning: apt autoremove failed."
+
 if ! command -v docker &> /dev/null; then
     echo "Installing Docker... (Please wait)"
     curl -fsSL https://get.docker.com | sh || echo "Warning: Docker installation failed."
 else
     echo "Skipped: Docker is already installed."
 fi
- 
-# Флаг: обновлялось ли ядро -> нужен ли reboot
+
 REBOOT_RECOMMENDED=false
 if [ -f /var/run/reboot-required ]; then
     REBOOT_RECOMMENDED=true
 fi
- 
-# --- 2. UFW settings ----------------------------------------------------------
+
+# --- 2. UFW settings (Auto-detect IPv4 & IPv6) ------------------------------
 echo "--- 2. Settings for UFW ---"
- 
-# Базовые порты выставляем/повторяем при каждом запуске
-ufw allow 22/tcp    || true
-ufw allow 80/tcp    || true
-ufw allow 443/tcp   || true
- 
-# Удаляем старые правила на 2222/tcp от "anywhere", если такие остались
+
+# Проверяем, реально ли активен стек IPv6 в ядре
+IPV6_USABLE=false
+if [ -e /proc/net/if_inet6 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" -eq 0 ]; then
+    IPV6_USABLE=true
+fi
+
+# Синхронизируем /etc/default/ufw с реальным состоянием IPv6 на сервере
+if [ -f /etc/default/ufw ]; then
+    if [ "$IPV6_USABLE" = true ]; then
+        sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+        echo "IPv6 stack detected: UFW configured for both IPv4 and IPv6 (IPV6=yes)."
+    else
+        sed -i 's/^IPV6=.*/IPV6=no/' /etc/default/ufw
+        echo "IPv6 stack is disabled in kernel: UFW set to IPv4-only (IPV6=no) to prevent reload errors."
+    fi
+fi
+
+# Базовые порты (если IPV6=yes, UFW автоматически создаст правила для IPv6)
+ufw allow 22/tcp  || true
+ufw allow 80/tcp  || true
+ufw allow 443/tcp || true
+
+# Удаляем старые правила на 2222/tcp, которые не относятся к текущему PANEL_IP
 ufw status numbered 2>/dev/null | grep "2222/tcp" | grep -v "$PANEL_IP" | \
     awk -F'[][]' '{print $2}' | sort -rn | while read -r num; do
-        [ -n "$num" ] && yes | ufw delete "$num" >/dev/null 2>&1 || true
+        [ -n "$num" ] && ufw --force delete "$num" >/dev/null 2>&1 || true
     done
- 
+
 ufw allow from "$PANEL_IP" to any port 2222 proto tcp || true
- 
+
 if ! ufw status | grep -qw "active"; then
     ufw default deny incoming  || true
     ufw default allow outgoing || true
@@ -115,152 +125,213 @@ if ! ufw status | grep -qw "active"; then
 else
     echo "UFW already active, rules refreshed."
 fi
- 
-# --- 3. BBR & network tweaks --------------------------------------------------
-echo "--- 3. Enable BBR & Network Tweaks ---"
- 
-KERNEL_MAJOR="$(uname -r | cut -d. -f1)"
-KERNEL_MINOR="$(uname -r | cut -d. -f2)"
-BBR_SUPPORTED=false
- 
-if [ "$KERNEL_MAJOR" -gt 4 ] || { [ "$KERNEL_MAJOR" -eq 4 ] && [ "$KERNEL_MINOR" -ge 9 ]; }; then
-    BBR_SUPPORTED=true
-fi
- 
-if [ "$BBR_SUPPORTED" = false ]; then
-    echo "Warning: kernel $(uname -r) is older than 4.9, BBR is not supported. Skipping."
-else
-    modprobe tcp_bbr 2>/dev/null || true
-    if ! lsmod | grep -qw tcp_bbr && ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-        echo "Warning: tcp_bbr module could not be loaded. Applying sysctl anyway, but it may fail to take effect."
-    fi
 
-    if ! grep -q "net.ipv4.tcp_congestion_control = bbr" /etc/sysctl.conf; then
-        cat <<'EOF' >> /etc/sysctl.conf
- 
-# --- BBR & Network Tweaks ---
+# --- 3. BBR, Sysctl, Conntrack & File Limits ----------------------------------
+echo "--- 3. Enable BBR, Network Tweaks & System Limits ---"
+
+# Автоопределение размера буферов по объему ОЗУ (>= 8 ГБ -> 64 МБ, иначе 16 МБ)
+TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+if [ "$TOTAL_RAM_MB" -ge 7500 ]; then
+    MAX_BUF=67108864
+    DEF_BUF=1048576
+    CONNTRACK_MAX=1048576
+    CONNTRACK_BUCKETS=262144
+else
+    MAX_BUF=16777216
+    DEF_BUF=262144
+    CONNTRACK_MAX=262144
+    CONNTRACK_BUCKETS=65536
+fi
+
+echo "Detected ${TOTAL_RAM_MB} MB RAM -> setting max TCP buffer to $((MAX_BUF / 1048576)) MB."
+
+modprobe tcp_bbr 2>/dev/null || true
+modprobe nf_conntrack 2>/dev/null || true
+echo "nf_conntrack" > /etc/modules-load.d/nf_conntrack.conf
+
+cat <<EOF > /etc/sysctl.d/99-network-tune.conf
+# --- BBR & Packet Scheduler ---
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
+
+# --- Queues & Backlogs ---
+net.core.somaxconn = 32768
+net.core.netdev_max_backlog = 65536
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 8000
+net.ipv4.tcp_max_syn_backlog = 32768
+
+# --- Socket Buffers ---
+net.core.rmem_max = ${MAX_BUF}
+net.core.wmem_max = ${MAX_BUF}
+net.core.rmem_default = ${DEF_BUF}
+net.core.wmem_default = ${DEF_BUF}
+net.core.optmem_max = 262144
+net.ipv4.tcp_rmem = 4096 131072 ${MAX_BUF}
+net.ipv4.tcp_wmem = 4096 131072 ${MAX_BUF}
+
+# --- UDP Optimizations ---
+net.ipv4.udp_mem = 65536 131072 262144
+net.ipv4.udp_rmem_min = 32768
+net.ipv4.udp_wmem_min = 32768
+
+# --- Latency & Responsiveness ---
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_fastopen = 0
+net.ipv4.tcp_notsent_lowat = 131072
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 2
+
+# --- Timeouts, Orphans & Protection ---
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_max_syn_backlog = 8192
-net.core.somaxconn = 8192
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_orphan_retries = 2
-net.ipv4.tcp_max_orphans = 65536
+net.ipv4.tcp_max_orphans = 131072
+net.ipv4.tcp_syncookies = 1
 net.ipv4.icmp_ratemask = 6160
+net.ipv4.ip_local_port_range = 10240 65535
+fs.file-max = 2097152
+
+# --- Conntrack Tuning ---
+net.netfilter.nf_conntrack_max = ${CONNTRACK_MAX}
+net.netfilter.nf_conntrack_tcp_timeout_established = 1800
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 EOF
-        sysctl --system || echo "Warning: Sysctl apply failed."
- 
-        if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
-            echo "Warning: BBR does not appear active yet. A reboot may be required."
-            REBOOT_RECOMMENDED=true
-        fi
-    else
-        echo "Skipped: Network optimizations are already configured."
-    fi
-fi
- 
-# --- 3.1 ICMP rate-limit (explicit control, complements icmp_ratemask) -------
+
+# Глобальные лимиты дескрипторов (LimitNOFILE) для systemd и контейнеров
+mkdir -p /etc/systemd/system.conf.d
+cat <<EOF > /etc/systemd/system.conf.d/limits.conf
+[Manager]
+DefaultLimitNOFILE=1048576
+EOF
+
+cat <<EOF > /etc/security/limits.d/99-nofile.conf
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+
+systemctl daemon-reexec || true
+
+# Автоопределение основного сетевого интерфейса
+DEFAULT_IFACE="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')"
+[ -z "$DEFAULT_IFACE" ] && DEFAULT_IFACE="eth0"
+
+cat <<EOF > /etc/systemd/system/network-tune-persist.service
+[Unit]
+Description=Apply all sysctl, conntrack and NIC network optimizations after boot
+After=network-online.target systemd-sysctl.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/modprobe nf_conntrack
+ExecStart=/usr/sbin/sysctl --system
+ExecStart=/bin/sh -c 'echo ${CONNTRACK_BUCKETS} > /sys/module/nf_conntrack/parameters/hashsize || true'
+ExecStart=/sbin/ip link set dev ${DEFAULT_IFACE} txqueuelen 10000
+ExecStart=/bin/sh -c '/sbin/tc qdisc replace dev ${DEFAULT_IFACE} root mq 2>/dev/null || /sbin/tc qdisc replace dev ${DEFAULT_IFACE} root fq || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now network-tune-persist.service || echo "Warning: network-tune-persist failed."
+
+# --- 3.1 ICMP rate-limit (IPv4 & IPv6) --------------------------------------
 echo "--- 3.1 ICMP Destination Unreachable rate-limit (ufw output rules) ---"
 ICMP_RATE_LIMIT="100/s"
 ICMP_RATE_BURST="200"
- 
+
 configure_icmp_output_limit() {
     local rules_file="$1"
     local proto_marker="$2"
- 
+
     if [ ! -f "$rules_file" ]; then
         echo "Warning: $rules_file not found, skipping ICMP rate-limit for it."
         return
     fi
- 
+
     if grep -q "# --- ICMP unreachable rate-limit ($proto_marker) ---" "$rules_file"; then
         echo "Skipped: ICMP rate-limit already configured in $rules_file."
         return
     fi
- 
+
     if ! grep -q "^COMMIT$" "$rules_file"; then
-        echo "Warning: no COMMIT line found in $rules_file, skipping (manual check needed)."
+        echo "Warning: no COMMIT line found in $rules_file, skipping."
         return
     fi
- 
+
     local icmp_type_match
+    local chain_prefix
     if [ "$proto_marker" = "icmp" ]; then
         icmp_type_match="-p icmp --icmp-type destination-unreachable"
+        chain_prefix="ufw-before-output"
     else
-        icmp_type_match="-p icmpv6 --icmpv6-type destination-unreachable"
+        icmp_type_match="-p ipv6-icmp --icmpv6-type destination-unreachable"
+        chain_prefix="ufw6-before-output"
     fi
- 
-    # Вставляем правила перед первым COMMIT (закрывает *filter таблицу)
+
     local tmp_file
     tmp_file="$(mktemp)"
-    awk -v marker="$proto_marker" -v match_str="$icmp_type_match" \
+    awk -v marker="$proto_marker" -v chain="$chain_prefix" -v match_str="$icmp_type_match" \
         -v limit="$ICMP_RATE_LIMIT" -v burst="$ICMP_RATE_BURST" '
         /^COMMIT$/ && !done {
             print "# --- ICMP unreachable rate-limit (" marker ") ---"
-            print "-A ufw-before-output " match_str " -m limit --limit " limit " --limit-burst " burst " -j ACCEPT"
-            print "-A ufw-before-output " match_str " -j DROP"
+            print "-A " chain " " match_str " -m limit --limit " limit " --limit-burst " burst " -j ACCEPT"
+            print "-A " chain " " match_str " -j DROP"
             print ""
             done = 1
         }
         { print }
     ' "$rules_file" > "$tmp_file"
- 
+
     if [ -s "$tmp_file" ]; then
         cp "$tmp_file" "$rules_file"
-        echo "Added ICMP ($proto_marker) rate-limit rules to $rules_file (${ICMP_RATE_LIMIT}, burst ${ICMP_RATE_BURST})."
+        echo "Added ICMP ($proto_marker) rate-limit rules to $rules_file."
     else
         echo "Warning: failed to update $rules_file, left unchanged."
     fi
     rm -f "$tmp_file"
 }
- 
+
 configure_icmp_output_limit /etc/ufw/before.rules "icmp"
- 
-# IPv6-правила трогаем только если IPv6 реально доступен в ядре и включён в самом ufw. 
-IPV6_USABLE=false
-if [ -e /proc/net/if_inet6 ] && [ -f /etc/default/ufw ] && grep -qE '^IPV6=yes' /etc/default/ufw; then
-    IPV6_USABLE=true
-fi
- 
+
 if [ "$IPV6_USABLE" = true ]; then
     configure_icmp_output_limit /etc/ufw/before6.rules "icmpv6"
 else
-    echo "Skipped: IPv6 is disabled or unavailable on this host, not touching before6.rules."
+    echo "Skipped before6.rules: IPv6 is disabled on this host."
 fi
- 
-# Перечитываем правила ufw, чтобы новые записи из before.rules применились
+
 if ufw status | grep -qw "active"; then
-    if ! ufw reload; then
-        echo "Warning: ufw reload failed."
-        if [ "$IPV6_USABLE" = true ]; then
-            echo "Check /etc/ufw/before6.rules for syntax issues, or set IPV6=no in /etc/default/ufw if this host has no real IPv6 stack."
-        fi
-    fi
+    ufw reload || echo "Warning: ufw reload failed."
 fi
- 
+
 # --- 4. WARP installation ------------------------------------------------------
 echo "--- 4. WARP Installation ---"
 if [ ! -f /etc/wireguard/warp.conf ]; then
     echo "Starting WARP installation (max wait: 120s)..."
-    echo "Note: this feeds preset answers to a third-party script; if its menu"
-    echo "changes upstream, this step may need to be re-checked manually."
     timeout 120s bash -c 'printf "1\n \n1\n" | bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)' \
         || echo "Warning: WARP installation failed or timed out! Skipping..."
 else
     echo "Skipped: WARP configuration (/etc/wireguard/warp.conf) already exists."
 fi
- 
+
 # --- 5. Install RemnaNode -------------------------------------------------------
 echo "--- 5. Install RemnaNode ---"
-mkdir -p /opt/remnanode || true
+mkdir -p /opt/remnanode
 cd /opt/remnanode || { echo "Error: Cannot enter /opt/remnanode directory."; exit 1; }
- 
+
 if [ ! -s "docker-compose.yml" ]; then
     echo "-------------------------------------------------------"
     echo "Nano is opening soon"
@@ -270,7 +341,7 @@ if [ ! -s "docker-compose.yml" ]; then
     echo "-------------------------------------------------------"
     sleep 2
     nano docker-compose.yml < /dev/tty || echo "Warning: Nano editor failed."
- 
+
     if [ ! -s "docker-compose.yml" ]; then
         echo "Error: docker-compose.yml is still empty. Aborting before compose up."
         exit 1
@@ -278,26 +349,25 @@ if [ ! -s "docker-compose.yml" ]; then
 else
     echo "Skipped: docker-compose.yml already exists and is not empty."
 fi
- 
+
 # --- 6. Start Docker Compose ------------------------------------------------
 echo "--- 6. Start Docker Compose ---"
-echo "Cleaning up dangling Docker images..."
 docker image prune -f || true
- 
+
 echo "Starting containers..."
 if ! timeout 120s docker compose up -d; then
     echo "Warning: Docker compose failed or timed out. Check logs below for details."
 fi
- 
+
 # --- 7. Reboot notice ---------------------------------------------------------
 if [ "$REBOOT_RECOMMENDED" = true ]; then
     echo "-------------------------------------------------------"
-    echo "NOTICE: A kernel update or BBR change was applied."
+    echo "NOTICE: A kernel update was applied."
     echo "A reboot is recommended for changes to fully take effect:"
     echo "    reboot"
     echo "-------------------------------------------------------"
 fi
- 
+
 # --- 8. Logs -------------------------------------------------------------------
 echo "--- 8. Logs (Ctrl + C for exit) ---"
-docker compose logs -f -t || echo "Warning: Cannot show logs."
+docker compose logs -f -t --tail=50 || echo "Warning: Cannot show logs."
