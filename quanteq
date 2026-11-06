@@ -49,8 +49,6 @@ DEFAULT_IFACE="eth0"
 TOTAL_RAM_MB=0
 MAX_BUF=16777216
 CONNTRACK_MAX=262144
-WARP_STATUS="Not installed"
-NODE_STATUS="Stopped"
 
 # --- UI Helpers ---
 msg_info() { printf ' %s[→]%s %s\n' "$C_CYAN" "$C_RESET" "$1"; }
@@ -99,7 +97,7 @@ usage() {
 Usage: bash quanteq [OPTIONS]
 
 Options:
-  -p, --panel-ip IP    Set Remnawave Panel IP (IPv4 or IPv6) non-interactively
+  -p, --panel-ip IP    Set Panel IP (IPv4 or IPv6) non-interactively
       --skip-upgrade   Skip apt full-upgrade (faster execution)
       --skip-warp      Skip Cloudflare WARP installation
       --no-logs        Do not attach to docker compose logs at the end
@@ -286,19 +284,20 @@ configure_icmp_output_limit() {
 configure_icmp_output_limit /etc/ufw/before.rules "icmp"
 [[ "$IPV6_USABLE" == true ]] && configure_icmp_output_limit /etc/ufw/before6.rules "icmpv6"
 
-# Allow standard ports
-for port in 22/tcp 80/tcp 443/tcp 443/udp; do
+# Allow only TCP ports (22/tcp, 80/tcp, 443/tcp) and remove legacy 443/udp if present
+ufw delete allow 443/udp >>"$LOG_FILE" 2>&1 || true
+for port in 22/tcp 80/tcp 443/tcp; do
     ufw allow "$port" >>"$LOG_FILE" 2>&1 || true
 done
 
-# Remove outdated 2222/tcp rules not matching current PANEL_IP
-ufw status numbered 2>/dev/null | grep "${REMNANODE_PORT}/tcp" | grep -v "$PANEL_IP" | \
+# Remove outdated 2222/tcp rules (or rules with legacy comments)
+ufw status numbered 2>/dev/null | grep "${REMNANODE_PORT}/tcp" | \
     awk -F'[][]' '{print $2}' | sort -rn | while read -r num; do
         [[ -n "$num" ]] && ufw --force delete "$num" >>"$LOG_FILE" 2>&1 || true
     done
 
-ufw allow from "$PANEL_IP" to any port "$REMNANODE_PORT" proto tcp comment 'RemnaNode Panel' >>"$LOG_FILE" 2>&1 || true
-msg_ok "Allowed ports 22, 80, 443 and restricted ${REMNANODE_PORT}/tcp to ${PANEL_IP}"
+ufw allow from "$PANEL_IP" to any port "$REMNANODE_PORT" proto tcp >>"$LOG_FILE" 2>&1 || true
+msg_ok "Allowed ports 22/tcp, 80/tcp, 443/tcp and restricted ${REMNANODE_PORT}/tcp to ${PANEL_IP}"
 
 if ! ufw status | grep -qw "active"; then
     ufw default deny incoming >>"$LOG_FILE" 2>&1 || true
@@ -365,12 +364,12 @@ net.core.optmem_max = 262144
 net.ipv4.tcp_rmem = 4096 131072 ${MAX_BUF}
 net.ipv4.tcp_wmem = 4096 131072 ${MAX_BUF}
 
-# --- UDP Optimizations (QUIC / Xray / WireGuard) ---
+# --- UDP Optimizations  ---
 net.ipv4.udp_mem = 65536 131072 262144
 net.ipv4.udp_rmem_min = 32768
 net.ipv4.udp_wmem_min = 32768
 
-# --- Latency, Stealth (TFO=0) & Proxy Throughput ---
+# --- Latency, Stealth ---
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 0
 net.ipv4.tcp_notsent_lowat = 131072
@@ -441,7 +440,7 @@ EOF
 
 systemctl daemon-reload
 if systemctl enable --now network-tune-persist.service >>"$LOG_FILE" 2>&1; then
-    msg_ok "Applied sysctl BBR (TFO=0), file limits & persistent NIC queue tuning (${DEFAULT_IFACE})"
+    msg_ok "Applied sysctl BBR, file limits & persistent NIC queue tuning (${DEFAULT_IFACE})"
 else
     msg_warn "network-tune-persist service reported warnings"
 fi
@@ -452,18 +451,12 @@ fi
 print_section "4. Cloudflare WARP (Native WireGuard)"
 
 if [[ "$SKIP_WARP" == true ]]; then
-    WARP_STATUS="Skipped (--skip-warp)"
     msg_info "Skipped WARP installation (--skip-warp)"
 elif [[ -f /etc/wireguard/warp.conf ]]; then
-    WARP_STATUS="Active (/etc/wireguard/warp.conf)"
     msg_ok "WARP configuration already exists (/etc/wireguard/warp.conf)"
 else
-    if run_with_spinner "Installing Cloudflare WARP (distillium/warp-native)" \
-        timeout 120s bash -c 'printf "1\n \n1\n" | bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)'; then
-        WARP_STATUS="Installed (/etc/wireguard/warp.conf)"
-    else
-        WARP_STATUS="Failed / Timed out"
-    fi
+    run_with_spinner "Installing Cloudflare WARP (distillium/warp-native)" \
+        timeout 120s bash -c 'printf "1\n \n1\n" | bash <(curl -fsSL https://raw.githubusercontent.com/distillium/warp-native/main/install.sh)' || true
 fi
 
 # ==============================================================================
@@ -495,26 +488,7 @@ fi
 
 docker image prune -f >>"$LOG_FILE" 2>&1 || true
 
-if run_with_spinner "Pulling images & starting RemnaNode containers" timeout 120s docker compose up -d; then
-    NODE_STATUS="Running (docker compose up -d)"
-else
-    NODE_STATUS="Failed (check logs below)"
-fi
-
-# ==============================================================================
-# 6. SUMMARY CARD & LOGS
-# ==============================================================================
-CC_ALGO=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "bbr")
-QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "fq")
-
-printf '\n'
-printf ' %s╭─ Quanteq Deployment Summary ─────────────────────────────╮%s\n' "$C_DIM" "$C_RESET"
-printf ' %s│%s  %-18s : %s%-34s%s %s│%s\n' "$C_DIM" "$C_RESET" "Panel IP (2222)" "$C_BOLD" "$PANEL_IP" "$C_RESET" "$C_DIM" "$C_RESET"
-printf ' %s│%s  %-18s : %-34s %s│%s\n' "$C_DIM" "$C_RESET" "Network Interface" "${DEFAULT_IFACE} (IPv6: ${IPV6_USABLE})" "$C_DIM" "$C_RESET"
-printf ' %s│%s  %-18s : %-34s %s│%s\n' "$C_DIM" "$C_RESET" "Congestion / Qdisc" "${CC_ALGO} + ${QDISC} ($((MAX_BUF / 1048576)) MB buffer)" "$C_DIM" "$C_RESET"
-printf ' %s│%s  %-18s : %-34s %s│%s\n' "$C_DIM" "$C_RESET" "Cloudflare WARP" "$WARP_STATUS" "$C_DIM" "$C_RESET"
-printf ' %s│%s  %-18s : %-34s %s│%s\n' "$C_DIM" "$C_RESET" "RemnaNode Status" "$NODE_STATUS" "$C_DIM" "$C_RESET"
-printf ' %s╰──────────────────────────────────────────────────────────╯%s\n' "$C_DIM" "$C_RESET"
+run_with_spinner "Pulling images & starting RemnaNode containers" timeout 120s docker compose up -d || true
 
 if [[ "$REBOOT_RECOMMENDED" == true ]]; then
     printf '\n %s[!]%s %sA kernel update was installed. Reboot is recommended:%s %sreboot%s\n' \
